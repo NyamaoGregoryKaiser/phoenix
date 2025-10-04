@@ -1,0 +1,28 @@
+# Sensitive files
+service_account.json
+*.json
+
+# CSV cache files (these will be stored in Google Sheets instead)
+*.csv
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db

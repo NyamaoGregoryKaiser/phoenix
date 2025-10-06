@@ -73,16 +73,21 @@ def process_disbursements_visualizations(df):
     if "Disbursed Date" in df.columns and value_col and "Branch" in df.columns:
         now_dt = datetime.today()
         year_mask = df["Disbursed Date"].dt.year.eq(now_dt.year)
-        df_year = df.loc[year_mask]
+        df_year = df.loc[year_mask].copy()
         if not df_year.empty:
+            # Ensure the value column is numeric
+            df_year[value_col] = pd.to_numeric(df_year[value_col], errors="coerce").fillna(0)
+            
             df_year["BranchName"] = df_year["Branch"].apply(_branch_code_to_name)
             df_year["Month"] = df_year["Disbursed Date"].dt.month_name()
             df_year["MonthOrder"] = df_year["Disbursed Date"].dt.month
+            
             monthly_branch = (
                 df_year.groupby(["MonthOrder", "Month", "BranchName"], as_index=False)[value_col]
                 .sum()
                 .sort_values(["MonthOrder", "BranchName"])
             )
+            # Filter out zero values but keep the data structure
             monthly_branch = monthly_branch[monthly_branch[value_col] > 0]
     
     # Time series data
@@ -755,7 +760,22 @@ if fetch_clicked:
                 # Monthly disbursed totals by branch (current year) - using cached data
                 if monthly_branch is not None and not monthly_branch.empty:
                     now_dt = datetime.today()
-                    value_col = monthly_branch.columns[2] if len(monthly_branch.columns) > 2 else "Value"
+                    # Identify the aggregated numeric value column
+                    value_col = None
+                    for c in monthly_branch.columns:
+                        if c not in ("MonthOrder", "Month", "BranchName"):
+                            value_col = c
+                            break
+                    if value_col is None:
+                        st.warning("Monthly branch data has no numeric value column.")
+                        value_col = "Value"
+                    
+                    # Debug: Show the data structure
+                    st.write(f"Debug: Monthly branch data shape: {monthly_branch.shape}")
+                    st.write(f"Debug: Columns: {list(monthly_branch.columns)}")
+                    st.write(f"Debug: Sample data:")
+                    st.dataframe(monthly_branch.head(10))
+                    
                     st.caption(f"Monthly {value_col.lower()} by branch ({now_dt.year})")
                     # Create clustered bar chart using Altair
                     chart = (
@@ -773,6 +793,55 @@ if fetch_clicked:
                         .properties(height=400)
                     )
                     st.altair_chart(chart, use_container_width=True)
+                else:
+                    st.warning("No monthly branch data available. This might be due to data filtering or missing columns.")
+                    # Fallback: Try to create the chart without caching
+                    if "Disbursed Date" in df.columns and "Branch" in df.columns:
+                        value_col = "Disbursed" if "Disbursed" in df.columns else ("Principal" if "Principal" in df.columns else ("Outstanding" if "Outstanding" in df.columns else None))
+                        if value_col:
+                            st.write("Trying fallback method...")
+                            now_dt = datetime.today()
+                            year_mask = df["Disbursed Date"].dt.year.eq(now_dt.year)
+                            df_year = df.loc[year_mask]
+                            if not df_year.empty:
+                                df_year["BranchName"] = df_year["Branch"].apply(_branch_code_to_name)
+                                df_year["Month"] = df_year["Disbursed Date"].dt.month_name()
+                                df_year["MonthOrder"] = df_year["Disbursed Date"].dt.month
+                                df_year[value_col] = pd.to_numeric(df_year[value_col], errors="coerce").fillna(0)
+                                
+                                monthly_branch_fallback = (
+                                    df_year.groupby(["MonthOrder", "Month", "BranchName"], as_index=False)[value_col]
+                                    .sum()
+                                    .sort_values(["MonthOrder", "BranchName"])
+                                )
+                                monthly_branch_fallback = monthly_branch_fallback[monthly_branch_fallback[value_col] > 0]
+                                
+                                if not monthly_branch_fallback.empty:
+                                    st.write(f"Fallback data shape: {monthly_branch_fallback.shape}")
+                                    st.dataframe(monthly_branch_fallback.head(10))
+                                    
+                                    st.caption(f"Monthly {value_col.lower()} by branch ({now_dt.year}) - Fallback")
+                                    chart = (
+                                        alt.Chart(monthly_branch_fallback)
+                                        .mark_bar()
+                                        .encode(
+                                            x=alt.X('Month:N', 
+                                                   sort=list(monthly_branch_fallback.sort_values('MonthOrder')['Month'].unique()), 
+                                                   title='Month',
+                                                   scale=alt.Scale(paddingInner=0.05, paddingOuter=0.4)),
+                                            xOffset=alt.XOffset('BranchName:N'),
+                                            y=alt.Y(f'{value_col}:Q', title=value_col),
+                                            color=alt.Color('BranchName:N', legend=alt.Legend(title='Branch'))
+                                        )
+                                        .properties(height=400)
+                                    )
+                                    st.altair_chart(chart, use_container_width=True)
+                                else:
+                                    st.warning("No data found after filtering for positive values.")
+                            else:
+                                st.warning("No data found for current year.")
+                        else:
+                            st.warning("No suitable amount column found (Disbursed, Principal, or Outstanding).")
 
                 # Time series: current month daily totals - using cached data
                 if time_series is not None and not time_series.empty:

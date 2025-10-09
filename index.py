@@ -2314,6 +2314,51 @@ elif par_enabled and not fetch_clicked:
             k2.metric("Sum principal_balance_amount (Status 1)", f"{total_pba_2:,.2f}")
             k3.metric("PAR (Portfolio at Risk)", f"{par_percentage:.2f}%")
             
+            # Create branch-wise summary data from cached data
+            branch_summary = []
+            for br in REPAYMENT_BRANCH_IDS:
+                # Get data for this branch from cached data
+                branch_pba_1 = 0.0
+                branch_pba_2 = 0.0
+                
+                # Find data for this branch in df1_cached (Past maturity + Missed + Arrears)
+                if not df1_cached.empty and "_branch_id" in df1_cached.columns:
+                    branch_df1 = df1_cached[df1_cached["_branch_id"] == br]
+                    if not branch_df1.empty:
+                        # Find principal balance column
+                        p_col = _find_column_case_insensitive(branch_df1, ["principal_balance_amount", "Principal Balance Amount", "principal_balance", "Principal Balance"])
+                        if p_col:
+                            series = branch_df1[p_col].astype(str).str.replace(",", "", regex=False)
+                            branch_pba_1 = float(pd.to_numeric(series, errors="coerce").sum())
+                
+                # Find data for this branch in df2_cached (Status 1)
+                if not df2_cached.empty and "_branch_id" in df2_cached.columns:
+                    branch_df2 = df2_cached[df2_cached["_branch_id"] == br]
+                    if not branch_df2.empty:
+                        # Find principal balance column
+                        p_col2 = _find_column_case_insensitive(branch_df2, ["principal_balance_amount", "Principal Balance Amount", "principal_balance", "Principal Balance"])
+                        if p_col2:
+                            series2 = branch_df2[p_col2].astype(str).str.replace(",", "", regex=False)
+                            branch_pba_2 = float(pd.to_numeric(series2, errors="coerce").sum())
+                
+                # Calculate branch PAR
+                branch_par = (branch_pba_1 / branch_pba_2 * 100) if branch_pba_2 > 0 else 0.0
+                
+                branch_summary.append({
+                    "Branch": _branch_code_to_name(br),
+                    "Past Maturity + Missed + Arrears": f"{branch_pba_1:,.2f}",
+                    "Status 1 (Active)": f"{branch_pba_2:,.2f}",
+                    "PAR (%)": f"{branch_par:.2f}"
+                })
+            
+            # Display branch-wise table
+            st.subheader("Branch-wise PAR Analysis")
+            if branch_summary:
+                df_branch_summary = pd.DataFrame(branch_summary)
+                st.dataframe(df_branch_summary, width='stretch')
+            else:
+                st.info("No branch data available")
+            
             st.caption("📊 Data source: Cached from Google Sheets")
         else:
             st.warning("⚠️ No cached PAR data found. Click 'Refresh Data' to fetch fresh data.")

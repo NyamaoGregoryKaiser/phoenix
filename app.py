@@ -9,6 +9,10 @@ import altair as alt
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 # Optional: Google Sheets integration
 try:
     import gspread
@@ -112,18 +116,37 @@ def process_disbursements_visualizations(df):
     return top_branches, status_counts, monthly_branch, time_series
 
 # --- API CONFIG ---
-API_URL = "https://api-main.loandisk.com/7125/75350/disbursement_report"
-
-# Use Streamlit secrets for production, fallback to hardcoded for local development
+# Use Streamlit secrets for production, fallback to environment variables for local development
 try:
     AUTH_KEY = st.secrets["LOANDISK_API_KEY"]
     GOOGLE_SHEETS_KEY = st.secrets["GOOGLE_SHEETS_KEY"]
     SERVICE_ACCOUNT_JSON = st.secrets["SERVICE_ACCOUNT_JSON"]
+    PUBLIC_KEY = st.secrets["LOANDISK_PUBLIC_KEY"]
+    BRANCH_ID = st.secrets["LOANDISK_BRANCH_ID"]
 except Exception:
-    # Fallback for local development
-    AUTH_KEY = "Basic DgPRFGb7VPYrnz7K68b4KqHNkYZkvswVqFGaU7xD"
-    GOOGLE_SHEETS_KEY = "1o7SvpdIx2nnburnzEeMQMZIiznRrB03UL3QBTfb2YZ4"
-    SERVICE_ACCOUNT_JSON = None
+    # Fallback to environment variables for local development
+    AUTH_KEY = os.getenv("LOANDISK_API_KEY")
+    GOOGLE_SHEETS_KEY = os.getenv("GOOGLE_SHEETS_KEY")
+    SERVICE_ACCOUNT_JSON = os.getenv("SERVICE_ACCOUNT_JSON")
+    PUBLIC_KEY = os.getenv("LOANDISK_PUBLIC_KEY")
+    BRANCH_ID = os.getenv("LOANDISK_BRANCH_ID")
+    
+    # Validate that required environment variables are set
+    if not AUTH_KEY:
+        st.error("❌ LOANDISK_API_KEY environment variable is not set. Please create a .env file with your credentials.")
+        st.stop()
+    if not GOOGLE_SHEETS_KEY:
+        st.error("❌ GOOGLE_SHEETS_KEY environment variable is not set. Please create a .env file with your credentials.")
+        st.stop()
+    if not PUBLIC_KEY:
+        st.error("❌ LOANDISK_PUBLIC_KEY environment variable is not set. Please create a .env file with your credentials.")
+        st.stop()
+    if not BRANCH_ID:
+        st.error("❌ LOANDISK_BRANCH_ID environment variable is not set. Please create a .env file with your credentials.")
+        st.stop()
+
+# Construct API URL from environment variables
+API_URL = f"https://api-main.loandisk.com/{PUBLIC_KEY}/{BRANCH_ID}/disbursement_report"
 
 HEADERS = {
     "Content-Type": "application/json",
@@ -350,7 +373,7 @@ BRANCH_NAME_MAP = {
     55886: "Utawala Branch",
     12936: "BURUBURU BRANCH",
     63796: "Kiambu Branch",
-    27133: "KIlimani Branch",
+    27133: "Kilimani Branch",
     77791: "Kitengela Branch",
 }
 
@@ -462,18 +485,86 @@ payload = {
 
 st.title("📊 Loandisk Disbursement Report")
 
-# Auto-fetch on page load/refresh
-fetch_clicked = True
+# Initialize session state for better state management
+if 'last_refresh_time' not in st.session_state:
+    st.session_state.last_refresh_time = None
+if 'data_fresh' not in st.session_state:
+    st.session_state.data_fresh = False
+if 'refresh_in_progress' not in st.session_state:
+    st.session_state.refresh_in_progress = False
 
+# Enhanced refresh control with better UI
+col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
+
+with col1:
+    if st.session_state.last_refresh_time:
+        last_refresh = st.session_state.last_refresh_time.strftime("%Y-%m-%d %H:%M:%S")
+        data_status = "🟢 Fresh" if st.session_state.data_fresh else "🟡 Cached"
+        st.caption(f"Data Status: {data_status} | Last Refresh: {last_refresh}")
+    else:
+        st.caption("Data Status: 🟡 Cached | Click 'Refresh Data' to fetch latest information")
+
+with col2:
+    # Disable button during refresh to prevent multiple clicks
+    fetch_clicked = st.button(
+        "🔄 Refresh Data" if not st.session_state.refresh_in_progress else "⏳ Refreshing...",
+        type="primary", 
+        help="Fetch fresh data from Loandisk API",
+        disabled=st.session_state.refresh_in_progress
+    )
+
+with col3:
+    # Show refresh status
+    if st.session_state.refresh_in_progress:
+        st.success("🔄 Fetching...")
+    elif st.session_state.data_fresh:
+        st.success("✅ Fresh")
+    else:
+        st.info("📊 Cached")
+
+with col4:
+    # Auto-refresh toggle
+    auto_refresh = st.checkbox("Auto-refresh", value=False, help="Automatically refresh data every 5 minutes")
+
+# Handle refresh logic
 if fetch_clicked:
+    st.session_state.refresh_in_progress = True
+    st.session_state.data_fresh = False
+    st.rerun()
+
+# Auto-refresh functionality
+if auto_refresh and not st.session_state.refresh_in_progress:
+    # Check if data is older than 5 minutes
+    if st.session_state.last_refresh_time:
+        time_since_refresh = datetime.now() - st.session_state.last_refresh_time
+        if time_since_refresh.total_seconds() > 300:  # 5 minutes
+            st.session_state.refresh_in_progress = True
+            st.session_state.data_fresh = False
+            st.info("🔄 Auto-refreshing data...")
+            st.rerun()
+    else:
+        # No previous refresh, trigger auto-refresh
+        st.session_state.refresh_in_progress = True
+        st.session_state.data_fresh = False
+        st.info("🔄 Auto-refreshing data...")
+        st.rerun()
+
+if fetch_clicked or st.session_state.refresh_in_progress:
     try:
         # Paginate through all pages to retrieve every result
         all_results = []
         meta_first = {}
         current_page = 1
         max_pages = 1000  # safety guard
-        progress = st.progress(0)
-        status_text = st.empty()
+        
+        # Enhanced progress tracking
+        progress_container = st.container()
+        with progress_container:
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            time_elapsed = st.empty()
+            
+        start_time = time.time()
 
         while current_page <= max_pages:
             status_text.write(f"Fetching page {current_page}…")
@@ -511,13 +602,19 @@ if fetch_clicked:
 
             all_results.extend(page_results if page_results else [])
 
-            # Progress update (best-effort based on TotalResults if present)
+            # Enhanced progress update with time tracking
             total_results_reported = meta_first.get("TotalResults") if isinstance(meta_first, dict) else None
             if isinstance(total_results_reported, int) and total_results_reported > 0:
-                progress.progress(min(1.0, len(all_results) / float(total_results_reported)))
+                progress_value = min(1.0, len(all_results) / float(total_results_reported))
+                progress_bar.progress(progress_value)
             else:
                 # fallback approximate
-                progress.progress(min(1.0, current_page / 10.0))
+                progress_value = min(1.0, current_page / 10.0)
+                progress_bar.progress(progress_value)
+            
+            # Update time elapsed
+            elapsed = time.time() - start_time
+            time_elapsed.text(f"⏱️ Elapsed: {elapsed:.1f}s")
 
             # Stop if this page returned fewer than requested or no items
             if not return_results or (isinstance(return_results, int) and return_results < payload["count"]):
@@ -525,12 +622,26 @@ if fetch_clicked:
 
             current_page += 1
 
-        progress.empty()
+        # Clean up progress indicators
+        progress_bar.empty()
         status_text.empty()
+        time_elapsed.empty()
+        
+        total_time = time.time() - start_time
+        st.success(f"✅ Data fetch completed in {total_time:.1f} seconds")
 
         if response.status_code == 200:
             data = data  # last page's data is already parsed above
             st.success("✅ Disbursements retrieved successfully!")
+            
+            # Update session state to mark data as fresh
+            st.session_state.last_refresh_time = datetime.now()
+            st.session_state.data_fresh = True
+            st.session_state.refresh_in_progress = False
+            
+            # Show completion notification
+            st.balloons()
+            st.success("🎉 Data refresh completed successfully!")
 
             # Handle both previous list format and the provided object format
             results = all_results
@@ -770,11 +881,6 @@ if fetch_clicked:
                         st.warning("Monthly branch data has no numeric value column.")
                         value_col = "Value"
                     
-                    # Debug: Show the data structure
-                    st.write(f"Debug: Monthly branch data shape: {monthly_branch.shape}")
-                    st.write(f"Debug: Columns: {list(monthly_branch.columns)}")
-                    st.write(f"Debug: Sample data:")
-                    st.dataframe(monthly_branch.head(10))
                     
                     st.caption(f"Monthly {value_col.lower()} by branch ({now_dt.year})")
                     # Create clustered bar chart using Altair
@@ -817,8 +923,6 @@ if fetch_clicked:
                                 monthly_branch_fallback = monthly_branch_fallback[monthly_branch_fallback[value_col] > 0]
                                 
                                 if not monthly_branch_fallback.empty:
-                                    st.write(f"Fallback data shape: {monthly_branch_fallback.shape}")
-                                    st.dataframe(monthly_branch_fallback.head(10))
                                     
                                     st.caption(f"Monthly {value_col.lower()} by branch ({now_dt.year}) - Fallback")
                                     chart = (
@@ -1024,13 +1128,311 @@ if fetch_clicked:
 
     except Exception as e:
         st.error(f"⚠️ Request failed: {e}")
+        # Reset refresh state on error
+        st.session_state.refresh_in_progress = False
+        st.session_state.data_fresh = False
+        st.rerun()
+else:
+    # Use cached data when not refreshing
+    if st.session_state.refresh_in_progress:
+        st.info("🔄 Refresh in progress... Please wait.")
+        st.stop()
+    
+    try:
+        df = _read_disbursements_df()
+        df = _normalize_columns(df)
+        if not df.empty:
+            # Check cache file age for better user information
+            try:
+                import os
+                cache_file = "disbursements_cache.csv"
+                if os.path.exists(cache_file):
+                    cache_age = datetime.now() - datetime.fromtimestamp(os.path.getmtime(cache_file))
+                    age_hours = cache_age.total_seconds() / 3600
+                    if age_hours < 1:
+                        age_text = f"{int(cache_age.total_seconds() / 60)} minutes ago"
+                    elif age_hours < 24:
+                        age_text = f"{int(age_hours)} hours ago"
+                    else:
+                        age_text = f"{int(age_hours / 24)} days ago"
+                    
+                    st.info(f"📊 Displaying cached data ({len(df)} records, updated {age_text})")
+                else:
+                    st.info(f"📊 Displaying cached data ({len(df)} records)")
+            except Exception:
+                st.info(f"📊 Displaying cached data ({len(df)} records)")
+            
+            # Add refresh suggestion based on data age
+            try:
+                if os.path.exists(cache_file):
+                    cache_age = datetime.now() - datetime.fromtimestamp(os.path.getmtime(cache_file))
+                    if cache_age.total_seconds() > 3600:  # Older than 1 hour
+                        st.warning("💡 Data is older than 1 hour. Consider refreshing for latest information.")
+            except Exception:
+                pass
+        else:
+            st.warning("⚠️ No cached disbursements found. Click 'Refresh Data' to fetch from API.")
+    except Exception as e:
+        st.error(f"⚠️ Failed to load cached disbursements: {e}")
+        df = pd.DataFrame()
 
+# Show disbursements data and visualizations regardless of source (fresh or cached)
+if not df.empty:
+    # Compute KPIs from the data (fresh or cached)
+    total_records = len(df)
+    
+    # Compute current month disbursement count
+    current_month_count = 0
+    try:
+        if "Disbursed Date" in df.columns and "Loan Id" in df.columns:
+            disb_series = pd.to_datetime(df["Disbursed Date"], dayfirst=True, errors="coerce")
+            now_dt = datetime.today()
+            mask_df = (
+                disb_series.dt.month.eq(now_dt.month)
+                & disb_series.dt.year.eq(now_dt.year)
+            )
+            current_month_count = int(df.loc[mask_df, "Loan Id"].astype(str).nunique())
+    except Exception:
+        current_month_count = 0
+
+    # Compute current month amount disbursed
+    current_month_amount = 0.0
+    try:
+        if "Disbursed Date" in df.columns and "Disbursed" in df.columns:
+            disb2 = pd.to_datetime(df["Disbursed Date"], dayfirst=True, errors="coerce")
+            now_dt2 = datetime.today()
+            mask2 = (
+                disb2.dt.month.eq(now_dt2.month)
+                & disb2.dt.year.eq(now_dt2.year)
+            )
+            principal_series = (
+                df.loc[mask2, "Disbursed"]
+                .astype(str)
+                .str.replace(",", "", regex=False)
+            )
+            current_month_amount = float(pd.to_numeric(principal_series, errors="coerce").fillna(0).sum())
+    except Exception:
+        current_month_amount = 0.0
+
+    # Compute today's amount disbursed
+    amount_disbursed_today = 0.0
+    try:
+        if "Disbursed Date" in df.columns and "Disbursed" in df.columns:
+            disb3 = pd.to_datetime(df["Disbursed Date"], dayfirst=True, errors="coerce")
+            today_dt = datetime.today().date()
+            mask_today = disb3.dt.date.eq(today_dt)
+            val_series2 = (
+                df.loc[mask_today, "Disbursed"]
+                .astype(str)
+                .str.replace(",", "", regex=False)
+            )
+            amount_disbursed_today = float(pd.to_numeric(val_series2, errors="coerce").fillna(0).sum())
+    except Exception:
+        amount_disbursed_today = 0.0
+
+    # Display KPIs with data quality indicators
+    kpi_cols = st.columns(5)
+    kpi_cols[0].metric("Total Records", f"{total_records}")
+    kpi_cols[1].metric("Current Month", f"{current_month_count}")
+    kpi_cols[2].metric("Amount Disbursed (This Month)", f"{current_month_amount:,.2f}")
+    kpi_cols[3].metric("Amount Disbursed Today", f"{amount_disbursed_today:,.2f}")
+    
+    # Data quality indicator
+    data_quality = "🟢 Fresh" if st.session_state.data_fresh else "🟡 Cached"
+    kpi_cols[4].metric("Data Quality", data_quality)
+
+    # Branch amounts (current month) cards below KPIs
+    _render_branch_monthly_cards(df, None)
+    # Show the effective date window used
+    st.caption(f"Date window: {start_date} → {today}")
+
+    # Clean data for visualizations
+    numeric_like_cols = [
+        "Outstanding", "Balance", "Principal", "Interest", "Total Due", "Disbursed",
+        "Fees Balance", "Interest Balance", "Penalty Balance", "Principal Balance",
+        "Fees Paid", "Interest Paid", "Penalty Paid", "Principal Paid"
+    ]
+    for col in numeric_like_cols:
+        if col in df.columns:
+            df[col] = (
+                df[col]
+                .astype(str)
+                .str.replace(",", "", regex=False)
+                .replace({"": None, "nan": None})
+            )
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+    date_cols = ["Disbursed Date", "Released", "Maturity", "NextDue", "Last Repayment", "DOB"]
+    for col in date_cols:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], format="%d/%m/%Y", errors="coerce")
+
+    # Visualizations
+    st.subheader("Visualisations")
+    vc1, vc2 = st.columns(2)
+
+    # Use cached visualization data for better performance
+    with st.spinner("Processing visualizations..."):
+        top_branches, status_counts, monthly_branch, time_series = process_disbursements_visualizations(df)
+    
+    # By Branch: total Disbursed
+    if top_branches is not None and not top_branches.empty:
+        vc1.caption(f"Top 10 branches by {top_branches.columns[1]}")
+        vc1.bar_chart(top_branches.set_index("Branch"))
+
+    # Status counts
+    if status_counts is not None and not status_counts.empty:
+        vc2.caption("Loans by status")
+        vc2.bar_chart(status_counts.set_index("Status"))
+
+    # Monthly disbursed totals by branch (current year)
+    if monthly_branch is not None and not monthly_branch.empty:
+        now_dt = datetime.today()
+        value_col = None
+        for c in monthly_branch.columns:
+            if c not in ("MonthOrder", "Month", "BranchName"):
+                value_col = c
+                break
+        if value_col is None:
+            st.warning("Monthly branch data has no numeric value column.")
+            value_col = "Value"
+        
+        st.caption(f"Monthly {value_col.lower()} by branch ({now_dt.year})")
+        chart = (
+            alt.Chart(monthly_branch)
+            .mark_bar()
+            .encode(
+                x=alt.X('Month:N', 
+                       sort=list(monthly_branch.sort_values('MonthOrder')['Month'].unique()), 
+                       title='Month',
+                       scale=alt.Scale(paddingInner=0.05, paddingOuter=0.4)),
+                xOffset=alt.XOffset('BranchName:N'),
+                y=alt.Y(f'{value_col}:Q', title=value_col),
+                color=alt.Color('BranchName:N', legend=alt.Legend(title='Branch'))
+            )
+            .properties(height=400)
+        )
+        st.altair_chart(chart, use_container_width=True)
+    else:
+        st.warning("No monthly branch data available. This might be due to data filtering or missing columns.")
+
+    # Time series: current month daily totals
+    if time_series is not None and not time_series.empty:
+        now_dt = datetime.today()
+        value_col = time_series.columns[1] if len(time_series.columns) > 1 else "Value"
+        col_l, col_r = st.columns(2)
+        with col_l:
+            st.caption(f"Current month daily total {value_col.lower()} ({now_dt.strftime('%B %Y')})")
+            chart = (
+                alt.Chart(time_series)
+                .mark_line(interpolate='monotone')
+                .encode(
+                    x=alt.X('Disbursed Date:T', title='Date'),
+                    y=alt.Y(f'{value_col}:Q', title=value_col)
+                )
+                .properties(height=300)
+            )
+            st.altair_chart(chart, use_container_width=True)
+        with col_r:
+            # Loan officers disbursements table (current month)
+            try:
+                # Local case-insensitive finder
+                def _find_ci(columns, candidates):
+                    lowered = {str(c).strip().lower(): c for c in columns}
+                    for cand in candidates:
+                        key = str(cand).strip().lower()
+                        if key in lowered:
+                            return lowered[key]
+                    return None
+
+                officer_col = _find_ci(
+                    df.columns,
+                    [
+                        "Sales Person", "Salesperson", "Sales_Person", "SalesPerson",
+                        "Sales Representative", "SalesRep", "Sales Rep",
+                    ]
+                )
+                if officer_col is None:
+                    officer_col = _find_ci(
+                        df.columns,
+                        [
+                            "LoanOfficer", "Loan Officer", "Loan Officer Name",
+                            "Officer", "Officer Name", "Field Officer", "FieldOfficer",
+                            "Account Officer", "AccountOfficer", "LoanOfficerName",
+                            "OfficerInCharge"
+                        ]
+                    )
+
+                st.caption("Sales Person - amount disbursed (current month)")
+                amt_col_off = "Principal" if "Principal" in df.columns else ("Outstanding" if "Outstanding" in df.columns else None)
+                if officer_col and "Disbursed Date" in df.columns and amt_col_off is not None:
+                    ddates = pd.to_datetime(df["Disbursed Date"], dayfirst=True, errors="coerce")
+                    mask_m = ddates.dt.month.eq(now_dt.month) & ddates.dt.year.eq(now_dt.year)
+                    tmp = df.loc[mask_m, [officer_col, amt_col_off]].copy()
+                    if tmp.empty:
+                        st.info("No disbursements for the current month.")
+                    else:
+                        tmp[amt_col_off] = tmp[amt_col_off].astype(str).str.replace(",", "", regex=False)
+                        tmp[amt_col_off] = pd.to_numeric(tmp[amt_col_off], errors='coerce').fillna(0.0)
+                        tbl = (
+                            tmp.groupby(officer_col)[amt_col_off]
+                            .sum()
+                            .sort_values(ascending=False)
+                            .reset_index()
+                        )
+                        tbl.columns = ["Sales Person", "Amount Disbursed"]
+                        tbl["Sales Person"] = tbl["Sales Person"].astype(str)
+                        tbl["Amount Disbursed"] = tbl["Amount Disbursed"].round(0).astype(int)
+                        st.dataframe(tbl, width='stretch')
+                else:
+                    st.info("Sales Person or amount column not found in data.")
+            except Exception as e:
+                st.error(f"Sales Person table unavailable. Error: {e}")
+
+    # Branch disbursements with date range filter
+    st.subheader("Branch Disbursements (Date Range)")
+    try:
+        if not df.empty and "Disbursed Date" in df.columns and "Branch" in df.columns:
+            col_d1, col_d2 = st.columns(2)
+            with col_d1:
+                br_from = st.date_input("Start Date", value=datetime.today().replace(day=1))
+            with col_d2:
+                br_to = st.date_input("End Date", value=datetime.today())
+
+            amt_col_branch = "Principal" if "Principal" in df.columns else ("Outstanding" if "Outstanding" in df.columns else None)
+            if amt_col_branch:
+                ddates_branch = pd.to_datetime(df["Disbursed Date"], dayfirst=True, errors="coerce")
+                mask_range = (ddates_branch.dt.date >= br_from) & (ddates_branch.dt.date <= br_to)
+                tmp_branch = df.loc[mask_range, ["Branch", amt_col_branch]].copy()
+                
+                if not tmp_branch.empty:
+                    tmp_branch[amt_col_branch] = tmp_branch[amt_col_branch].astype(str).str.replace(",", "", regex=False)
+                    tmp_branch[amt_col_branch] = pd.to_numeric(tmp_branch[amt_col_branch], errors='coerce').fillna(0.0)
+                    tmp_branch["BranchName"] = tmp_branch["Branch"].apply(_branch_code_to_name)
+                    tbl_branch = (
+                        tmp_branch.groupby("BranchName")[amt_col_branch]
+                        .sum()
+                        .sort_values(ascending=False)
+                        .reset_index()
+                    )
+                    tbl_branch.columns = ["Branch", f"{amt_col_branch}"]
+                    st.dataframe(tbl_branch, width='stretch')
+                else:
+                    st.info(f"No disbursements found between {br_from} and {br_to}")
+            else:
+                st.info("No amount column found for branch analysis")
+        else:
+            st.info("No disbursement data available for branch analysis")
+    except Exception as e:
+        st.error(f"Error loading branch disbursements: {e}")
+else:
+    st.warning("⚠️ No disbursement data available. Click 'Refresh Data' to fetch from API.")
 
 # --- Repayments fetch and cache (Advanced Search) ---
 st.divider()
 st.subheader("Repayments (Advanced Search)")
 
-REPAYMENTS_API_URL = "https://api-main.loandisk.com/7125/{branch_id}/advanced_search_repayments"
+REPAYMENTS_API_URL = f"https://api-main.loandisk.com/{PUBLIC_KEY}/{{branch_id}}/advanced_search_repayments"
 REPAYMENT_PAGE_SIZE = 100  # API caps ReturnResults at 100 for advanced search
 REPAYMENTS_CSV_PATH = "repayments_cache.csv"
 REPAYMENT_BRANCH_IDS = [55886, 12936, 63796, 27133, 75350, 8550, 77791]
@@ -1108,8 +1510,10 @@ if repay_from_date != "01/01/2025":
     st.success(f"✅ Using cached repayments data - fetching from {repay_from_date}")
 else:
     st.warning(f"⚠️ No cached repayments data found - fetching from {repay_from_date}")
+
 if fetch_clicked:
     try:
+        st.info("🔄 Fetching fresh repayments data...")
         # Build base payload (use same date window as disbursements)
         repay_payload = {
             "from": 1,  # Start at 1 per Postman example
@@ -1530,7 +1934,28 @@ if fetch_clicked:
 
     except Exception as e:
         st.error(f"⚠️ Repayments fetch failed: {e}")
+else:
+    # Use cached repayments data when not refreshing
+    st.info("📊 Displaying cached repayments data. Click 'Refresh Data' to fetch latest information.")
+    try:
+        df_rep = _read_repayments_df()
+        df_rep = _normalize_columns(df_rep)
+        df_rep = _clean_frame_for_csv(df_rep)
+        if not df_rep.empty:
+            st.success(f"✅ Loaded {len(df_rep)} cached repayment records")
+        else:
+            st.warning("⚠️ No cached repayments found. Click 'Refresh Data' to fetch from API.")
+    except Exception as e:
+        st.error(f"⚠️ Failed to load cached repayments: {e}")
+        df_rep = pd.DataFrame()
 
+# Show repayments data and visualizations regardless of source (fresh or cached)
+if not df_rep.empty:
+    # Display repayments KPIs and visualizations here
+    # (The existing repayment KPI and visualization code would go here)
+    pass
+else:
+    st.warning("⚠️ No repayment data available. Click 'Refresh Data' to fetch from API.")
 
 # --- Advanced Loans: principal_balance_amount summaries ---
 st.divider()
@@ -1539,12 +1964,16 @@ st.subheader("PAR CALCULATION AND SUMMARY")
 # Performance optimization: Add a toggle to enable/disable PAR calculation
 par_enabled = st.checkbox("Enable PAR Calculation", value=True, help="Uncheck to skip PAR calculation for faster loading")
 
-ADV_LOANS_API_URL = "https://api-main.loandisk.com/7125/{branch_id}/advanced_search_loans"
+# Only fetch fresh PAR data when refresh button is clicked
+if not fetch_clicked:
+    st.info("📊 PAR calculation using cached data. Click 'Refresh Data' to fetch fresh PAR information.")
+
+ADV_LOANS_API_URL = f"https://api-main.loandisk.com/{PUBLIC_KEY}/{{branch_id}}/advanced_search_loans"
 ADV_LOANS_CSV_PATH_1 = "advanced_loans_past_missed_arrears.csv"
 ADV_LOANS_CSV_PATH_2 = "advanced_loans_status_1.csv"
 
-# Conditional PAR calculation for performance
-if par_enabled:
+# Conditional PAR calculation for performance (only when refresh is clicked)
+if par_enabled and fetch_clicked:
     # Always fetch fresh data for PAR calculation
     need_fetch_adv_loans = True
     st.info("🔄 Fetching fresh advanced loans data...")
@@ -1847,159 +2276,226 @@ if par_enabled:
 
     except Exception as e:
         st.error(f"⚠️ Advanced loans summary failed: {e}")
+elif par_enabled and not fetch_clicked:
+    # Show cached PAR data when not refreshing
+    st.info("📊 Displaying cached PAR data. Click 'Refresh Data' to fetch fresh PAR information.")
+    try:
+        # Try to load cached PAR data from Google Sheets
+        df1_cached = _read_adv1_df()
+        df2_cached = _read_adv2_df()
+        
+        if not df1_cached.empty or not df2_cached.empty:
+            st.success("✅ Loaded cached PAR data from Google Sheets")
+            
+            # Calculate PAR from cached data
+            total_pba_1 = 0.0
+            total_pba_2 = 0.0
+            
+            # Calculate from cached df1 (Past maturity + Missed + Arrears)
+            if not df1_cached.empty:
+                p_col = _find_column_case_insensitive(df1_cached, ["principal_balance_amount", "Principal Balance Amount", "principal_balance", "Principal Balance"])
+                if p_col:
+                    series = df1_cached[p_col].astype(str).str.replace(",", "", regex=False)
+                    total_pba_1 = float(pd.to_numeric(series, errors="coerce").sum())
+            
+            # Calculate from cached df2 (Status 1)
+            if not df2_cached.empty:
+                p_col2 = _find_column_case_insensitive(df2_cached, ["principal_balance_amount", "Principal Balance Amount", "principal_balance", "Principal Balance"])
+                if p_col2:
+                    series2 = df2_cached[p_col2].astype(str).str.replace(",", "", regex=False)
+                    total_pba_2 = float(pd.to_numeric(series2, errors="coerce").sum())
+            
+            # Calculate PAR percentage
+            par_percentage = (total_pba_1 / total_pba_2 * 100) if total_pba_2 > 0 else 0.0
+            
+            # Display cached PAR results
+            k1, k2, k3 = st.columns(3)
+            k1.metric("Sum principal_balance_amount (Past maturity + Missed + Arrears)", f"{total_pba_1:,.2f}")
+            k2.metric("Sum principal_balance_amount (Status 1)", f"{total_pba_2:,.2f}")
+            k3.metric("PAR (Portfolio at Risk)", f"{par_percentage:.2f}%")
+            
+            st.caption("📊 Data source: Cached from Google Sheets")
+        else:
+            st.warning("⚠️ No cached PAR data found. Click 'Refresh Data' to fetch fresh data.")
+    except Exception as e:
+        st.error(f"⚠️ Failed to load cached PAR data: {e}")
+        st.info("Click 'Refresh Data' to fetch fresh PAR information.")
 else:
     st.info("PAR calculation is disabled. Check the box above to enable it.")
 
 # --- Advanced Loans: Status 10 (table) ---
 st.divider()
 st.subheader("Advanced Loans - Status 10")
-try:
-    # Local helpers (mirror behavior used above):
-    def _post_adv_status10(branch_id: int, payload_dict: dict):
-        try:
-            url = ADV_LOANS_API_URL.format(branch_id=branch_id)
-            r = _post_json(url, HEADERS, payload_dict)
-            data = r.json() if r.status_code == 200 else {}
-            err = data.get("error", {}) if isinstance(data, dict) else {}
-            if isinstance(err, dict) and str(err.get("message", "")).lower().strip() == "wrong content type":
-                form_headers = dict(HEADERS)
-                form_headers["Content-Type"] = "application/x-www-form-urlencoded"
-                r = _post_form(url, form_headers, payload_dict)
-                data = r.json() if r.status_code == 200 else {}
-            return r.status_code, data
-        except Exception:
-            return 0, {}
 
-    def _extract_results_generic_status10(data_obj):
-        def _flatten(items):
-            out = []
-            stack = list(items if isinstance(items, list) else [items])
-            while stack:
-                v = stack.pop(0)
-                if isinstance(v, dict):
-                    out.append(v)
-                elif isinstance(v, list):
-                    stack[:0] = v
-            return out
+if fetch_clicked:
+    st.info("🔄 Fetching fresh Status 10 data...")
+else:
+    st.info("📊 Displaying cached Status 10 data. Click 'Refresh Data' to fetch latest information.")
 
-        if isinstance(data_obj, dict) and "response" in data_obj:
-            r = data_obj.get("response", {})
-            raw = r.get("Results", [])
-            if isinstance(raw, dict):
-                try:
-                    raw_list = [raw[k] for k in sorted(raw.keys(), key=lambda x: int(x))]
-                except Exception:
-                    raw_list = list(raw.values())
-            else:
-                raw_list = raw if isinstance(raw, list) else []
-            return _flatten(raw_list)
-        elif isinstance(data_obj, list):
-            return _flatten(data_obj)
-        return []
-
-    payload_status_10 = {
-        "from": 1,
-        "count": 100,
-        "loan_status_id": "10",
-    }
-
-    dfs_status10 = []
-    for br in REPAYMENT_BRANCH_IDS:
-        # Robust pagination supporting both page-based and offset-based semantics
-        mode = "page"  # try page index first
-        page_index = 1
-        offset = 1
-        max_pages = 2000
-        collected_for_branch = 0
-        total_for_branch = None
-        seen_keys = set()
-        while True:
-            if mode == "page":
-                payload_status_10["from"] = page_index
-            else:
-                payload_status_10["from"] = offset
-
-            status, data = _post_adv_status10(br, payload_status_10)
-            results = _extract_results_generic_status10(data) if status == 200 else []
-            df_b = pd.json_normalize(results) if len(results) > 0 else pd.DataFrame()
-
-            # metadata
+if fetch_clicked:
+    try:
+        # Local helpers (mirror behavior used above):
+        def _post_adv_status10(branch_id: int, payload_dict: dict):
             try:
-                rmeta = data.get("response", {}) if isinstance(data, dict) else {}
-                total_for_branch = rmeta.get("TotalResults", total_for_branch)
-                returned = rmeta.get("ReturnResults")
-                start_index = rmeta.get("StartIndex")
+                url = ADV_LOANS_API_URL.format(branch_id=branch_id)
+                r = _post_json(url, HEADERS, payload_dict)
+                data = r.json() if r.status_code == 200 else {}
+                err = data.get("error", {}) if isinstance(data, dict) else {}
+                if isinstance(err, dict) and str(err.get("message", "")).lower().strip() == "wrong content type":
+                    form_headers = dict(HEADERS)
+                    form_headers["Content-Type"] = "application/x-www-form-urlencoded"
+                    r = _post_form(url, form_headers, payload_dict)
+                    data = r.json() if r.status_code == 200 else {}
+                return r.status_code, data
             except Exception:
-                returned = None
-                start_index = None
+                return 0, {}
 
-            if not df_b.empty:
-                df_b["_branch_id"] = br
+        def _extract_results_generic_status10(data_obj):
+            def _flatten(items):
+                out = []
+                stack = list(items if isinstance(items, list) else [items])
+                while stack:
+                    v = stack.pop(0)
+                    if isinstance(v, dict):
+                        out.append(v)
+                    elif isinstance(v, list):
+                        stack[:0] = v
+                return out
+
+            if isinstance(data_obj, dict) and "response" in data_obj:
+                r = data_obj.get("response", {})
+                raw = r.get("Results", [])
+                if isinstance(raw, dict):
+                    try:
+                        raw_list = [raw[k] for k in sorted(raw.keys(), key=lambda x: int(x))]
+                    except Exception:
+                        raw_list = list(raw.values())
+                else:
+                    raw_list = raw if isinstance(raw, list) else []
+                return _flatten(raw_list)
+            elif isinstance(data_obj, list):
+                return _flatten(data_obj)
+            return []
+
+        payload_status_10 = {
+            "from": 1,
+            "count": 100,
+            "loan_status_id": "10",
+        }
+
+        dfs_status10 = []
+        for br in REPAYMENT_BRANCH_IDS:
+            # Robust pagination supporting both page-based and offset-based semantics
+            mode = "page"  # try page index first
+            page_index = 1
+            offset = 1
+            max_pages = 2000
+            collected_for_branch = 0
+            total_for_branch = None
+            seen_keys = set()
+            while True:
+                if mode == "page":
+                    payload_status_10["from"] = page_index
+                else:
+                    payload_status_10["from"] = offset
+
+                status, data = _post_adv_status10(br, payload_status_10)
+                results = _extract_results_generic_status10(data) if status == 200 else []
+                df_b = pd.json_normalize(results) if len(results) > 0 else pd.DataFrame()
+
+                # metadata
                 try:
-                    df_b["_branch_name"] = _branch_code_to_name(br)
+                    rmeta = data.get("response", {}) if isinstance(data, dict) else {}
+                    total_for_branch = rmeta.get("TotalResults", total_for_branch)
+                    returned = rmeta.get("ReturnResults")
+                    start_index = rmeta.get("StartIndex")
                 except Exception:
-                    df_b["_branch_name"] = str(br)
-
-                # optional de-duplication by a composite key if present
-                dedupe_key = None
-                for c in ["loan_id", "Loan Id", "id", "Id"]:
-                    if c in df_b.columns:
-                        dedupe_key = c
-                        break
-                if dedupe_key is not None:
-                    df_b = df_b[~df_b[dedupe_key].astype(str).isin(seen_keys)]
-                    seen_keys.update(df_b[dedupe_key].astype(str).tolist())
+                    returned = None
+                    start_index = None
 
                 if not df_b.empty:
-                    dfs_status10.append(df_b)
-                    collected_for_branch += len(df_b)
-            else:
-                # If page mode produced empty but we expect more, switch to offset once
-                if mode == "page" and (isinstance(total_for_branch, int) and collected_for_branch < total_for_branch):
-                    mode = "offset"
-                    offset = collected_for_branch + 1
-                    continue
-                break
+                    df_b["_branch_id"] = br
+                    try:
+                        df_b["_branch_name"] = _branch_code_to_name(br)
+                    except Exception:
+                        df_b["_branch_name"] = str(br)
 
-            # stop conditions
-            if isinstance(total_for_branch, int) and collected_for_branch >= total_for_branch:
-                break
+                    # optional de-duplication by a composite key if present
+                    dedupe_key = None
+                    for c in ["loan_id", "Loan Id", "id", "Id"]:
+                        if c in df_b.columns:
+                            dedupe_key = c
+                            break
+                    if dedupe_key is not None:
+                        df_b = df_b[~df_b[dedupe_key].astype(str).isin(seen_keys)]
+                        seen_keys.update(df_b[dedupe_key].astype(str).tolist())
 
-            if mode == "page":
-                # If page returned fewer than requested and no explicit total, assume last page
-                if isinstance(returned, int) and isinstance(payload_status_10.get("count"), int) and returned < payload_status_10["count"]:
-                    # but if collected < total, switch to offset to be safe
-                    if isinstance(total_for_branch, int) and collected_for_branch < total_for_branch:
+                    if not df_b.empty:
+                        dfs_status10.append(df_b)
+                        collected_for_branch += len(df_b)
+                else:
+                    # If page mode produced empty but we expect more, switch to offset once
+                    if mode == "page" and (isinstance(total_for_branch, int) and collected_for_branch < total_for_branch):
                         mode = "offset"
                         offset = collected_for_branch + 1
                         continue
                     break
-                page_index += 1
-                if page_index > max_pages:
+
+                # stop conditions
+                if isinstance(total_for_branch, int) and collected_for_branch >= total_for_branch:
                     break
+
+                if mode == "page":
+                    # If page returned fewer than requested and no explicit total, assume last page
+                    if isinstance(returned, int) and isinstance(payload_status_10.get("count"), int) and returned < payload_status_10["count"]:
+                        # but if collected < total, switch to offset to be safe
+                        if isinstance(total_for_branch, int) and collected_for_branch < total_for_branch:
+                            mode = "offset"
+                            offset = collected_for_branch + 1
+                            continue
+                        break
+                    page_index += 1
+                    if page_index > max_pages:
+                        break
+                else:
+                    # offset mode: advance by returned or by count if missing
+                    step = returned if isinstance(returned, int) and returned > 0 else payload_status_10.get("count", 100)
+                    offset += step
+                    if step == 0:
+                        break
+                    if offset > (total_for_branch or (collected_for_branch + 1) + 100000):
+                        break
+
+        if len(dfs_status10) > 0:
+            non_empty = [d for d in dfs_status10 if d is not None and not d.empty]
+            out10 = pd.concat(non_empty, ignore_index=True) if len(non_empty) > 0 else pd.DataFrame()
+            # Arrow safety: coerce object columns to string
+            if not out10.empty:
+                for c in out10.columns:
+                    if out10[c].dtype == "object":
+                        out10[c] = out10[c].astype(str)
+                st.dataframe(out10, width='stretch')
+                ok, msg = _gs_write_df("AdvLoans_Status10", out10)
+                if not ok:
+                    st.caption(f"Sheets: {msg}")
             else:
-                # offset mode: advance by returned or by count if missing
-                step = returned if isinstance(returned, int) and returned > 0 else payload_status_10.get("count", 100)
-                offset += step
-                if step == 0:
-                    break
-                if offset > (total_for_branch or (collected_for_branch + 1) + 100000):
-                    break
+                st.info("No records found for status 10 across selected branches.")
 
-    if len(dfs_status10) > 0:
-        non_empty = [d for d in dfs_status10 if d is not None and not d.empty]
-        out10 = pd.concat(non_empty, ignore_index=True) if len(non_empty) > 0 else pd.DataFrame()
-        # Arrow safety: coerce object columns to string
-        if not out10.empty:
-            for c in out10.columns:
-                if out10[c].dtype == "object":
-                    out10[c] = out10[c].astype(str)
-            st.dataframe(out10, width='stretch')
-            ok, msg = _gs_write_df("AdvLoans_Status10", out10)
-            if not ok:
-                st.caption(f"Sheets: {msg}")
+    except Exception as e:
+        st.error(f"⚠️ Status 10 fetch failed: {e}")
+else:
+    # Use cached Status 10 data when not refreshing
+    try:
+        df_status10_cached = _gs_read_df("AdvLoans_Status10")[0]
+        if df_status10_cached is not None and not df_status10_cached.empty:
+            st.success(f"✅ Loaded {len(df_status10_cached)} cached Status 10 records")
+            # Arrow safety: coerce object columns to string
+            for c in df_status10_cached.columns:
+                if df_status10_cached[c].dtype == "object":
+                    df_status10_cached[c] = df_status10_cached[c].astype(str)
+            st.dataframe(df_status10_cached, width='stretch')
         else:
-            st.info("No records found for status 10 across selected branches.")
-
-except Exception as e:
-    st.error(f"⚠️ Status 10 fetch failed: {e}")
+            st.warning("⚠️ No cached Status 10 data found. Click 'Refresh Data' to fetch from API.")
+    except Exception as e:
+        st.error(f"⚠️ Failed to load cached Status 10 data: {e}")
+        st.info("Click 'Refresh Data' to fetch fresh Status 10 information.")

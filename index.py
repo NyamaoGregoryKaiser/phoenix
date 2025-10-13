@@ -29,22 +29,18 @@ except Exception:
 st.set_page_config(page_title="Loandisk Disbursement Report", layout="wide")
 
 # Performance optimization: Cache expensive operations
-@st.cache_data(ttl=300)  # Cache for 5 minutes
 def get_cached_disbursements_data():
     """Cache disbursements data to avoid repeated API calls"""
     return _read_disbursements_df()
 
-@st.cache_data(ttl=300)  # Cache for 5 minutes  
 def get_cached_repayments_data():
     """Cache repayments data to avoid repeated API calls"""
     return _read_repayments_df()
 
-@st.cache_data(ttl=600)  # Cache for 10 minutes (PAR calculation is expensive)
 def get_cached_par_data():
     """Cache PAR calculation data"""
     return None  # We'll implement this properly
 
-@st.cache_data(ttl=1800)  # Cache for 30 minutes
 def process_disbursements_visualizations(df):
     """Cache processed visualization data"""
     if df.empty:
@@ -530,6 +526,7 @@ with col4:
 if fetch_clicked:
     st.session_state.refresh_in_progress = True
     st.session_state.data_fresh = False
+    # Clear any cached data by forcing a rerun
     st.rerun()
 
 # Auto-refresh functionality
@@ -551,6 +548,13 @@ if auto_refresh and not st.session_state.refresh_in_progress:
 
 if fetch_clicked or st.session_state.refresh_in_progress:
     try:
+        # Clear any existing cache to ensure fresh data fetch
+        if hasattr(st.session_state, '_cache_cleared') and st.session_state._cache_cleared:
+            pass  # Already cleared in this session
+        else:
+            # Mark that we're doing a fresh fetch
+            st.session_state._cache_cleared = True
+            
         # Paginate through all pages to retrieve every result
         all_results = []
         meta_first = {}
@@ -634,15 +638,6 @@ if fetch_clicked or st.session_state.refresh_in_progress:
             data = data  # last page's data is already parsed above
             st.success("✅ Disbursements retrieved successfully!")
             
-            # Update session state to mark data as fresh
-            st.session_state.last_refresh_time = datetime.now()
-            st.session_state.data_fresh = True
-            st.session_state.refresh_in_progress = False
-            
-            # Show completion notification
-            st.balloons()
-            st.success("🎉 Data refresh completed successfully!")
-
             # Handle both previous list format and the provided object format
             results = all_results
             meta = meta_first if isinstance(meta_first, dict) else {}
@@ -818,16 +813,7 @@ if fetch_clicked or st.session_state.refresh_in_progress:
                 except Exception:
                     amount_disbursed_today = 0.0
 
-                kpi_cols = st.columns(4)
-                kpi_cols[0].metric("Total Records", f"{total_records}")
-                kpi_cols[1].metric("Current Month", f"{current_month_count}")
-                kpi_cols[2].metric("Amount Disbursed (This Month)", f"{current_month_amount:,.2f}")
-                kpi_cols[3].metric("Amount Disbursed Today", f"{amount_disbursed_today:,.2f}")
-
-                # Branch amounts (current month) cards below KPIs (second row)
-                _render_branch_monthly_cards(df, None)
-                # Show the effective date window used
-                st.caption(f"Date window: {start_date} → {today}")
+                # Fresh data processed successfully - display will be handled by main display section
 
                 # Attempt basic cleaning: numeric columns and dates commonly present
                 numeric_like_cols = [
@@ -850,13 +836,7 @@ if fetch_clicked or st.session_state.refresh_in_progress:
                     if col in df.columns:
                         df[col] = pd.to_datetime(df[col], format="%d/%m/%Y", errors="coerce")
 
-                # Visualizations (using cached data)
-                st.subheader("Visualisations")
-                vc1, vc2 = st.columns(2)
-
-                # Use cached visualization data for better performance
-                with st.spinner("Processing visualizations..."):
-                    top_branches, status_counts, monthly_branch, time_series = process_disbursements_visualizations(df)
+                # Visualizations removed from fresh data section - will be handled by main display section
                 
                 # By Branch: total Disbursed (using cached data)
                 if top_branches is not None and not top_branches.empty:
@@ -1050,74 +1030,21 @@ if fetch_clicked or st.session_state.refresh_in_progress:
                         .sort_values("Disbursed Date")
                     )
 
-                # Branch disbursements with date range filter
-                st.subheader("Branch Disbursements (Date Range)")
-                try:
-                    # Prefer CSV for completeness
-                    df_branch = None
-                    if False:
-                        try:
-                            df_branch = _read_disbursements_df()
-                            df_branch = _normalize_columns(df_branch)
-                        except Exception:
-                            df_branch = None
-                    if df_branch is None:
-                        df_branch = df.copy()
-                    
-                    if not df_branch.empty and "Disbursed Date" in df_branch.columns and "Branch" in df_branch.columns:
-                        # Date range inputs
-                        col_d1, col_d2 = st.columns(2)
-                        with col_d1:
-                            br_from = st.date_input("Start Date", value=datetime.today().replace(day=1))
-                        with col_d2:
-                            br_to = st.date_input("End Date", value=datetime.today())
-
-                        # Choose amount column
-                        amt_col_branch = "Principal" if "Principal" in df_branch.columns else ("Outstanding" if "Outstanding" in df_branch.columns else None)
-                        if amt_col_branch:
-                            # Parse dates and filter for range
-                            ddates_branch = pd.to_datetime(df_branch["Disbursed Date"], dayfirst=True, errors="coerce")
-                            mask_range = (ddates_branch.dt.date >= br_from) & (ddates_branch.dt.date <= br_to)
-                            tmp_branch = df_branch.loc[mask_range, ["Branch", amt_col_branch]].copy()
-                            
-                            # Always render a table (empty or with data)
-                            # Clean numeric and map branch codes to names
-                            if not tmp_branch.empty:
-                                tmp_branch[amt_col_branch] = tmp_branch[amt_col_branch].astype(str).str.replace(",", "", regex=False)
-                                tmp_branch[amt_col_branch] = pd.to_numeric(tmp_branch[amt_col_branch], errors='coerce').fillna(0.0)
-                                tmp_branch["BranchName"] = tmp_branch["Branch"].apply(_branch_code_to_name)
-                                # Group by branch and sum
-                                branch_table = (
-                                    tmp_branch.groupby("BranchName")[amt_col_branch]
-                            .sum()
-                                    .sort_values(ascending=False)
-                            .reset_index()
-                                )
-                                branch_table.columns = ["Branch", "Amount Disbursed"]
-                                branch_table["Branch"] = branch_table["Branch"].astype(str)
-                                branch_table["Amount Disbursed"] = branch_table["Amount Disbursed"].round(0).astype(int)
-                            else:
-                                branch_table = pd.DataFrame({"Branch": [], "Amount Disbursed": []})
-                            st.caption(f"Disbursements by branch ({br_from.strftime('%d/%m/%Y')} to {br_to.strftime('%d/%m/%Y')})")
-                            st.dataframe(branch_table, width='stretch')
-                        else:
-                            st.info("Amount column not found for branch disbursements.")
-                    else:
-                        st.info("Required columns (Disbursed Date, Branch) not found.")
-                except Exception as e:
-                    st.error(f"Error loading branch disbursements: {e}")
-
-                # Detailed table
-                with st.expander("View raw table", expanded=False):
-                    # Clean data types for Arrow compatibility
-                    df_display = df.copy()
-                    for col in df_display.columns:
-                        if df_display[col].dtype == 'object':
-                            # Convert mixed types to strings
-                            df_display[col] = df_display[col].astype(str)
-                    st.dataframe(df_display, width='stretch')
-
+                # All display logic removed from fresh data section - handled by main display section
+                # All display logic removed from fresh data section - handled by main display section
                 
+                # Update session state to mark data as fresh (after data is saved)
+                st.session_state.last_refresh_time = datetime.now()
+                st.session_state.data_fresh = True
+                st.session_state.refresh_in_progress = False
+                st.session_state._cache_cleared = False  # Reset cache flag
+                
+                # Show completion notification
+                st.balloons()
+                st.success("🎉 Data refresh completed successfully!")
+                
+                # Trigger rerun to show updated data quality status
+                st.rerun()
             else:
                 st.info("No disbursement records found for this period.")
                 
@@ -1131,6 +1058,7 @@ if fetch_clicked or st.session_state.refresh_in_progress:
         # Reset refresh state on error
         st.session_state.refresh_in_progress = False
         st.session_state.data_fresh = False
+        st.session_state._cache_cleared = False  # Reset cache flag
         st.rerun()
 else:
     # Use cached data when not refreshing
@@ -1138,45 +1066,59 @@ else:
         st.info("🔄 Refresh in progress... Please wait.")
         st.stop()
     
-    try:
-        df = _read_disbursements_df()
-        df = _normalize_columns(df)
-        if not df.empty:
-            # Check cache file age for better user information
-            try:
-                import os
-                cache_file = "disbursements_cache.csv"
-                if os.path.exists(cache_file):
-                    cache_age = datetime.now() - datetime.fromtimestamp(os.path.getmtime(cache_file))
-                    age_hours = cache_age.total_seconds() / 3600
-                    if age_hours < 1:
-                        age_text = f"{int(cache_age.total_seconds() / 60)} minutes ago"
-                    elif age_hours < 24:
-                        age_text = f"{int(age_hours)} hours ago"
+    # Load data (fresh if available, otherwise cached)
+    if fetch_clicked or st.session_state.refresh_in_progress:
+        # Fresh data should be available from the refresh process
+        # Try to read the most recent data
+        try:
+            df = _read_disbursements_df()
+            df = _normalize_columns(df)
+            if not df.empty:
+                st.info("📊 Displaying fresh data from recent refresh")
+        except Exception as e:
+            st.error(f"⚠️ Failed to load fresh data: {e}")
+            df = pd.DataFrame()
+    else:
+        # Load cached data when not refreshing
+        try:
+            df = _read_disbursements_df()
+            df = _normalize_columns(df)
+            if not df.empty:
+                # Check cache file age for better user information
+                try:
+                    import os
+                    cache_file = "disbursements_cache.csv"
+                    if os.path.exists(cache_file):
+                        cache_age = datetime.now() - datetime.fromtimestamp(os.path.getmtime(cache_file))
+                        age_hours = cache_age.total_seconds() / 3600
+                        if age_hours < 1:
+                            age_text = f"{int(cache_age.total_seconds() / 60)} minutes ago"
+                        elif age_hours < 24:
+                            age_text = f"{int(age_hours)} hours ago"
+                        else:
+                            age_text = f"{int(age_hours / 24)} days ago"
+                        
+                        st.info(f"📊 Displaying cached data ({len(df)} records, updated {age_text})")
                     else:
-                        age_text = f"{int(age_hours / 24)} days ago"
-                    
-                    st.info(f"📊 Displaying cached data ({len(df)} records, updated {age_text})")
-                else:
+                        st.info(f"📊 Displaying cached data ({len(df)} records)")
+                except Exception:
                     st.info(f"📊 Displaying cached data ({len(df)} records)")
-            except Exception:
-                st.info(f"📊 Displaying cached data ({len(df)} records)")
-            
-            # Add refresh suggestion based on data age
-            try:
-                if os.path.exists(cache_file):
-                    cache_age = datetime.now() - datetime.fromtimestamp(os.path.getmtime(cache_file))
-                    if cache_age.total_seconds() > 3600:  # Older than 1 hour
-                        st.warning("💡 Data is older than 1 hour. Consider refreshing for latest information.")
-            except Exception:
-                pass
-        else:
-            st.warning("⚠️ No cached disbursements found. Click 'Refresh Data' to fetch from API.")
-    except Exception as e:
-        st.error(f"⚠️ Failed to load cached disbursements: {e}")
-        df = pd.DataFrame()
+                
+                # Add refresh suggestion based on data age
+                try:
+                    if os.path.exists(cache_file):
+                        cache_age = datetime.now() - datetime.fromtimestamp(os.path.getmtime(cache_file))
+                        if cache_age.total_seconds() > 3600:  # Older than 1 hour
+                            st.warning("💡 Data is older than 1 hour. Consider refreshing for latest information.")
+                except Exception:
+                    pass
+            else:
+                st.warning("⚠️ No cached disbursements found. Click 'Refresh Data' to fetch from API.")
+        except Exception as e:
+            st.error(f"⚠️ Failed to load cached disbursements: {e}")
+            df = pd.DataFrame()
 
-# Show disbursements data and visualizations regardless of source (fresh or cached)
+# Show disbursements data and visualizations (both fresh and cached data)
 if not df.empty:
     # Compute KPIs from the data (fresh or cached)
     total_records = len(df)
@@ -1389,15 +1331,15 @@ if not df.empty:
             except Exception as e:
                 st.error(f"Sales Person table unavailable. Error: {e}")
 
-    # Branch disbursements with date range filter
+    # Branch disbursements with date range filter (cached data)
     st.subheader("Branch Disbursements (Date Range)")
     try:
         if not df.empty and "Disbursed Date" in df.columns and "Branch" in df.columns:
             col_d1, col_d2 = st.columns(2)
             with col_d1:
-                br_from = st.date_input("Start Date", value=datetime.today().replace(day=1))
+                br_from = st.date_input("Start Date", value=datetime.today().replace(day=1), key="cached_start_date")
             with col_d2:
-                br_to = st.date_input("End Date", value=datetime.today())
+                br_to = st.date_input("End Date", value=datetime.today(), key="cached_end_date")
 
             amt_col_branch = "Principal" if "Principal" in df.columns else ("Outstanding" if "Outstanding" in df.columns else None)
             if amt_col_branch:
@@ -1415,7 +1357,8 @@ if not df.empty:
                         .sort_values(ascending=False)
                         .reset_index()
                     )
-                    tbl_branch.columns = ["Branch", f"{amt_col_branch}"]
+                    tbl_branch.columns = ["Branch", "Amount Disbursed"]
+                    st.caption(f"Disbursements by branch ({br_from.strftime('%d/%m/%Y')} to {br_to.strftime('%d/%m/%Y')})")
                     st.dataframe(tbl_branch, width='stretch')
                 else:
                     st.info(f"No disbursements found between {br_from} and {br_to}")
@@ -1951,9 +1894,141 @@ else:
 
 # Show repayments data and visualizations regardless of source (fresh or cached)
 if not df_rep.empty:
-    # Display repayments KPIs and visualizations here
-    # (The existing repayment KPI and visualization code would go here)
-    pass
+    # --- Repayments KPIs (two rows) ---
+    try:
+        # Use the cached repayments data
+        df_kpi = df_rep.copy()
+        df_kpi = _normalize_columns(df_kpi)
+        df_kpi = _clean_frame_for_csv(df_kpi)
+
+        # Identify key columns
+        repay_id_col = _find_column_case_insensitive(df_kpi, ["repayment_id", "repayment id"]) 
+        repay_amt_col = _find_column_case_insensitive(df_kpi, ["repayment_amount", "repayment amount", "amount", "payment", "paid"]) 
+        repay_date_col = _find_column_case_insensitive(df_kpi, ["repayment_collected_date", "repayment collected date", "paid date"]) 
+
+        # Total records
+        if repay_id_col:
+            total_records_repay = df_kpi[repay_id_col].astype(str).nunique()
+        else:
+            total_records_repay = len(df_kpi)
+
+        # Date parsing
+        repay_dates_all = pd.to_datetime(df_kpi[repay_date_col], dayfirst=True, errors="coerce") if repay_date_col else pd.to_datetime(pd.Series([], dtype=str))
+        now_dt = datetime.today()
+        mask_month_rep = repay_dates_all.dt.month.eq(now_dt.month) & repay_dates_all.dt.year.eq(now_dt.year) if repay_date_col else pd.Series([], dtype=bool)
+        mask_today_rep = repay_dates_all.dt.date.eq(now_dt.date()) if repay_date_col else pd.Series([], dtype=bool)
+
+        # Amount series
+        if repay_amt_col:
+            amt_series_all = pd.to_numeric(df_kpi[repay_amt_col].astype(str).str.replace(",", "", regex=False), errors="coerce").fillna(0.0)
+        else:
+            amt_series_all = pd.Series([], dtype=float)
+
+        # Current month count (unique repayment ids this month if available)
+        if repay_id_col and repay_date_col:
+            current_month_count_repay = int(df_kpi.loc[mask_month_rep, repay_id_col].astype(str).nunique())
+        elif repay_date_col:
+            current_month_count_repay = int(mask_month_rep.sum())
+        else:
+            current_month_count_repay = 0
+
+        # Amounts
+        amount_repaid_month = float(amt_series_all.loc[mask_month_rep].sum()) if repay_date_col else 0.0
+        amount_repaid_today = float(amt_series_all.loc[mask_today_rep].sum()) if repay_date_col else 0.0
+
+        # First KPI row (repayments)
+        r_kpi_cols = st.columns(4)
+        r_kpi_cols[0].metric("Repayments - Total Records", f"{total_records_repay}")
+        r_kpi_cols[1].metric("Repayments - Current Month", f"{current_month_count_repay}")
+        r_kpi_cols[2].metric("Amount Repaid (This Month)", f"{amount_repaid_month:,.2f}")
+        r_kpi_cols[3].metric("Amount Repaid Today", f"{amount_repaid_today:,.2f}")
+
+        # Second KPI row (repayments by branch - rounded integers, hide zeros)
+        branch_code_col = _find_column_case_insensitive(df_kpi, ["branch_id", "branch id"]) 
+        branch_name_col = _find_column_case_insensitive(df_kpi, ["branch"]) 
+        if repay_date_col and (branch_code_col or branch_name_col) and repay_amt_col:
+            df_b = pd.DataFrame({
+                "_date": repay_dates_all,
+                "_amt": amt_series_all,
+                "_branch": df_kpi[branch_code_col] if branch_code_col else df_kpi[branch_name_col]
+            })
+            df_b = df_b.loc[df_b["_date"].dt.month.eq(now_dt.month) & df_b["_date"].dt.year.eq(now_dt.year)]
+            if not df_b.empty:
+                if branch_code_col:
+                    df_b["BranchName"] = df_b["_branch"].apply(_branch_code_to_name)
+                else:
+                    df_b["BranchName"] = df_b["_branch"].astype(str)
+                grouped_b = df_b.groupby("BranchName")["_amt"].sum()
+                ordered_pairs = [
+                    (75350, "Thika Branch"),
+                    (8550, "TOWN BRANCH"),
+                    (55886, "Utawala Branch"),
+                    (12936, "BURUBURU BRANCH"),
+                    (63796, "Kiambu Branch"),
+                    (27133, "Kilimani Branch"),
+                    (77791, "Kitengela Branch"),
+                ]
+                names = [nm for _, nm in ordered_pairs]
+                non_zero_pairs = [(nm, float(grouped_b.get(nm, 0.0))) for nm in names if float(grouped_b.get(nm, 0.0)) > 0]
+                if len(non_zero_pairs) > 0:
+                    st.caption("Repayments this month by branch")
+                    r_cols_branch = st.columns(len(non_zero_pairs))
+                    for i, (nm, vl) in enumerate(non_zero_pairs):
+                        r_cols_branch[i].metric(f"{nm}", f"{int(round(vl)):,}")
+    except Exception as e:
+        st.error(f"Error displaying repayments KPIs: {e}")
+
+    # Build current-year daily totals for repayments and plot
+    try:
+        # Use the cached repayments data
+        df_rep_source = df_rep.copy()
+        df_rep_source = _normalize_columns(df_rep_source)
+        df_rep_source = _clean_frame_for_csv(df_rep_source)
+
+        rep_value_col = _find_column_case_insensitive(df_rep_source, ["repayment_amount", "repayment amount"]) 
+        if rep_value_col is None:
+            rep_value_col = _find_column_case_insensitive(df_rep_source, ["amount", "payment", "paid"]) 
+        rep_date_col = _find_column_case_insensitive(df_rep_source, ["repayment_collected_date", "repayment collected date"]) 
+        if rep_date_col is None:
+            rep_date_col = _find_column_case_insensitive(df_rep_source, ["paid date"]) 
+
+        if rep_value_col and rep_date_col:
+            rep_dates_all = pd.to_datetime(df_rep_source[rep_date_col], dayfirst=True, errors="coerce")
+            rep_amount_all = pd.to_numeric(
+                df_rep_source[rep_value_col].astype(str).str.replace(",", "", regex=False),
+                errors="coerce"
+            ).fillna(0.0)
+            df_rep_all = pd.DataFrame({"_date": rep_dates_all, "Repaid": rep_amount_all})
+            now_dt = datetime.today()
+            df_rep_year = df_rep_all.loc[df_rep_all["_date"].dt.year.eq(now_dt.year)]
+            if not df_rep_year.empty:
+                rep_ts_only = (
+                    pd.DataFrame({"_date": rep_dates_all, "Repaid": rep_amount_all})
+                    .loc[df_rep_all["_date"].dt.year.eq(now_dt.year)]
+                    .groupby(pd.Grouper(key="_date", freq="D"))["Repaid"]
+                    .sum()
+                    .reset_index()
+                    .sort_values("_date")
+                )
+                if not rep_ts_only.empty:
+                    rep_ts_only["MonthOrder"] = pd.to_datetime(rep_ts_only["_date"]).dt.month
+                    rep_ts_only["Month"] = pd.to_datetime(rep_ts_only["_date"]).dt.month_name()
+                    rep_month_only = rep_ts_only.groupby(["MonthOrder", "Month"], as_index=False)["Repaid"].sum()
+                    rep_month_only = rep_month_only.sort_values("MonthOrder").set_index("Month")
+                    st.caption("Monthly totals (current year): Repaid")
+                    st.bar_chart(rep_month_only)
+    except Exception as e:
+        st.error(f"Error displaying repayments chart: {e}")
+
+    # Show repayments data table
+    with st.expander("View repayments data", expanded=False):
+        # Clean data types for Arrow compatibility
+        df_rep_display = df_rep.copy()
+        for col in df_rep_display.columns:
+            if df_rep_display[col].dtype == 'object':
+                df_rep_display[col] = df_rep_display[col].astype(str)
+        st.dataframe(df_rep_display, width='stretch')
+
 else:
     st.warning("⚠️ No repayment data available. Click 'Refresh Data' to fetch from API.")
 
